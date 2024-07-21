@@ -11,6 +11,13 @@ class GPTConfig:
     n_head: int = 6
     n_embd: int = 6
 
+class MultiHeadSelfAttention(nn.Module):
+    def __init__(self, config):
+        pass
+
+    def forward(self, x):
+        pass
+
 """
 One of the changes from transformer to GPT is that 
 we want the residual to not be inside the layer normalization so that
@@ -31,7 +38,7 @@ class Block(nn.Module):
         """
 
         self.ln_1 = nn.LayerNorm(config.n_embd)
-        self.attn = CausalSelfAttention(config) # weighted sum, communicate
+        self.attn = MultiHeadSelfAttention(config) # weighted sum, communicate
         self.ln_2 = nn.LayerNorm(config.n_embd)
         self.mlp = MLP(config) # think individually
     
