@@ -1,22 +1,55 @@
 import torch
 import torch.nn as nn
-from torch.nn import functional
+from torch.nn import functional as F
+
+import math
+from dataclasses import dataclass
 
 # B T C = Batch size, Sequence length, Embedding dimension
 
+@dataclass
 class GPTConfig:
-    block_size: int = 256
-    vocab_size: int = 65
-    n_layer: int = 6
-    n_head: int = 6
-    n_embd: int = 6
+    block_size: int = 1024
+    vocab_size: int = 50257
+    n_layer: int = 12
+    n_head: int = 12
+    n_embd: int = 768
 
 class MultiHeadSelfAttention(nn.Module):
     def __init__(self, config):
-        pass
+        super().__init__()
+        self.c_attn = nn.Linear(config.n_embd, 3 * config.n_embd)
+        self.c_proj = nn.Linear(config.n_embd, config.n_embd)
+        self.n_head = config.n_head
+        self.n_embd = config.n_embd
+
+        self.register_buffer("bias", torch.tril(torch.ones(config.block_size, config.block_size))
+                             .view(1, 1, config.block_size, config.block_size))
 
     def forward(self, x):
-        pass
+        B, T, C = x.size()
+        qvk = self.c_attn(x)
+        q, k, v = qvk.split(self.n_embd, dim=2)
+
+        """
+        Number of tokens stays the same, only embeddings change by the size of number of heads.
+        Taking only specific number of embeddings are like applying filters to certain embedding
+        dimensions, so we can get various many filters (like kernels in CNN)
+        """
+
+        q = q.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, T, number of heads, embedding for each head) -> (B, number of heads, T, embedding for each head)
+        k = k.view(B, T, self.n_head, C // self.n_head).transpose(1, 2).transpose(-2, -1)
+        v = v.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)
+
+        attention_scores = (q @ k) * (1.0 / math.sqrt(k.size(-1)))
+        attention_scores = attention_scores.masked_fill(self.bias[:, :, :T, :T] == 0, float("-inf"))
+        attention_scores = F.softmax(attention_scores, dim=-1)
+
+        y = attention_scores @ v
+        y = y.transpose(1, 2).contiguous().view(B, T, C)
+        y = self.c_proj(y)
+        
+        return y
 
 """
 One of the changes from transformer to GPT is that 
@@ -59,7 +92,7 @@ class MLP(nn.Module):
         campute more filters in first, then return back)
         """
         self.c_fc = nn.Linear(config.n_embd, 4 * config.n_embd)
-        self.c_proj = nn.Linear(4 * config.embed, config.n_embd)
+        self.c_proj = nn.Linear(4 * config.n_embd, config.n_embd)
 
         """
         GELU is Gaussian error linear unit such that it avoid the issue with ReLU 
@@ -96,3 +129,52 @@ class GPT(nn.Module):
             ln_f = nn.LayerNorm(config.n_embd)
         ))
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
+
+    @classmethod
+    def from_pretrained(cls, model_type):
+        assert model_type in {'gpt2', 'gpt2-medium', 'gpt2-large', 'gpt2-xl'}
+        from transformers import GPT2LMHeadModel
+        print("Loading weights from pretrained GPT-2")
+
+        config_args = {
+            "gpt2": dict(n_layer=12, n_head=12, n_embd=768),
+            "gpt2-medium": dict(n_layer=24, n_head=16, n_embd=1024),
+            "gpt2-large": dict(n_layer=36, n_head=20, n_embd=1280),
+            "gpt2-xl": dict(n_layer=48, n_head=25, n_embd=1600)
+        }[model_type]
+        config_args["vocab_size"] = 50257
+        config_args["block_size"] = 1024
+
+        config = GPTConfig(**config_args)
+        model = GPT(config)
+        sd = model.state_dict()
+        sd_keys = sd.keys()
+        sd_keys = [k for k in sd_keys if not k.endswith(".attn.bias")]
+
+        model_hf = GPT2LMHeadModel.from_pretrained(model_type)
+        sd_hf = model_hf.state_dict()
+
+        sd_keys_hf = sd_hf.keys()
+        sd_keys_hf = [k for k in sd_keys_hf if not k.endswith(".attn.masked_bias")]
+        sd_keys_hf = [k for k in sd_keys_hf if not k.endswith(".attn.bias")]
+        transposed = ['attn.c_attn.weight', 'attn.c_proj.weight', 'mlp.c_fc.weight', 'mlp.c_proj.weight']
+
+        assert len(sd_keys_hf) == len(sd_keys), f"mismatched keys: {len(sd_keys_hf)} != {len(sd_keys)}"
+        for k in sd_keys_hf:
+            if any(k.endswith(w) for w in transposed):
+                assert sd_hf[k].shape[::-1] == sd[k].shape
+                with torch.no_grad():
+                    sd[k].copy_(sd_hf[k].t())
+            else:
+                assert sd_hf[k].shape == sd[k].shape
+                with torch.no_grad():
+                    sd[k].copy_(sd_hf[k])
+
+        return model
+    
+
+model = GPT.from_pretrained("gpt2")
+sd_hf = model.state_dict()
+
+for k, v in sd_hf.items():
+    print(k, v.shape)
