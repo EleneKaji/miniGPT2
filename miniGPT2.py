@@ -38,7 +38,7 @@ class MultiHeadSelfAttention(nn.Module):
         """
 
         q = q.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, T, number of heads, embedding for each head) -> (B, number of heads, T, embedding for each head)
-        k = k.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)
+        k = k.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # we can transpose here as well but k.size(-1) changes
         v = v.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)
 
         attention_scores = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))
@@ -130,7 +130,7 @@ class GPT(nn.Module):
         ))
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
 
-    def forward(self, x):
+    def forward(self, x, y=None):
         """
         transformer.wte.weight torch.Size([50257, 768]) = # of tokens, embedding dimensions (vector representing tokens)
         transformer.wpe.weight torch.Size([1024, 768]) = sequence length, embedding dimensions 
@@ -150,7 +150,17 @@ class GPT(nn.Module):
         x = self.transformer.ln_f(x)
         logits = self.lm_head(x)
 
-        return logits
+        loss = None
+        
+        """
+        We return B, T, vocab size as logits. Vocab size basically includes the probabilities of each token being predicted after a sequence
+        of T tokens. We use the probabilities for cross entropy loss calculations which helps to get the likelyhood of one token being 
+        predicted and is a much better use. 
+        """
+        if y is not None:
+            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), y.view(-1)) # (B*T, vocab_size) Vs (B*T)
+
+        return logits, loss
 
     @classmethod
     def from_pretrained(cls, model_type):
@@ -194,15 +204,38 @@ class GPT(nn.Module):
 
         return model
 
-device = ("cuda:0" if torch.cuda.is_available() else "cpu")    
+device = ("cuda:0" if torch.cuda.is_available() else "cpu") # mps stands for apple silicon that has a gpu    
 
-model = GPT.from_pretrained("gpt2")
+# model = GPT.from_pretrained("gpt2")
+model = GPT(GPTConfig())
 model.eval()
 model.to(device)
 
 import tiktoken
+tokenizer = tiktoken.get_encoding("gpt2")
+
+with open("miniShakespeare.txt", "r") as f:
+    text = f.read()
+text = text[:1000]
+B, T = 4, 32
+encoded_text = torch.tensor(tokenizer.encode(text)[:B * T + 1])
+encoded_text = encoded_text.to(device)
+x = encoded_text[:-1].view(B, T)
+y = encoded_text[1:].view(B, T)
+
+optimizer = torch.optim.AdamW(model.parameters(), 3e-4)
+for i in range(50):
+    optimizer.zero_grad()
+    logits, loss = model(x, y) # loss at start should be around -ln(1/50257) cuz of cross entrophy function
+    loss.backward()
+    optimizer.step()
+    print(f"-> {i}\t loss: {loss.item()}")
+    
+
+
+import tiktoken
 encoder = tiktoken.get_encoding("gpt2")
-tokens = encoder.encode("Hello, I'm a language model,")
+tokens = tokenizer.encode("All:\n")
 tokens = torch.tensor(tokens, dtype=torch.long)
 tokens = tokens.unsqueeze(0).repeat(5, 1)
 x = tokens.to(device)
@@ -212,7 +245,7 @@ torch.manual_seed(42)
 torch.cuda.manual_seed(42)
 while x.size(1) < max_length: 
     with torch.no_grad():
-        logits = model(x)
+        logits, loss = model(x)
         logits = logits[:, -1, :]
         probs = F.softmax(logits, dim=-1)
         top_probs, top_indices = torch.topk(probs, 50, dim=1)
@@ -222,5 +255,5 @@ while x.size(1) < max_length:
 
 for i in range(5):
     tokens = x[i, :max_length].tolist()
-    decoded = encoder.decode(tokens)
-    print(">", decoded)
+    decoded = tokenizer.decode(tokens)
+    print(">", decoded, "\n")
