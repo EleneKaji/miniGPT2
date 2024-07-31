@@ -38,10 +38,10 @@ class MultiHeadSelfAttention(nn.Module):
         """
 
         q = q.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, T, number of heads, embedding for each head) -> (B, number of heads, T, embedding for each head)
-        k = k.view(B, T, self.n_head, C // self.n_head).transpose(1, 2).transpose(-2, -1)
+        k = k.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)
         v = v.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)
 
-        attention_scores = (q @ k) * (1.0 / math.sqrt(k.size(-1)))
+        attention_scores = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))
         attention_scores = attention_scores.masked_fill(self.bias[:, :, :T, :T] == 0, float("-inf"))
         attention_scores = F.softmax(attention_scores, dim=-1)
 
@@ -136,19 +136,21 @@ class GPT(nn.Module):
         transformer.wpe.weight torch.Size([1024, 768]) = sequence length, embedding dimensions 
         """
         # x is Batch Size and Sequence Length (in tokens)
-        B, T = x.shape
+        B, T = x.size()
+        assert T <= self.config.block_size, f"Cannot forward sequence of length {T}, block size is only {self.config.block_size}"
+
         positions = torch.arange(0, T, dtype=torch.long, device=x.device)
         position_embd = self.transformer.wpe(positions) # (sequence length, embedding dimensions)
         token_embd = self.transformer.wte(x) # (batch size, sequence length, embedding dimensions)
-        sum = position_embd + token_embd
+        x = token_embd + position_embd
         
         for block in self.transformer.h:
-            x = block(sum)
+            x = block(x)
         
         x = self.transformer.ln_f(x)
-        x = self.lm_head(x)
+        logits = self.lm_head(x)
 
-        return x
+        return logits
 
     @classmethod
     def from_pretrained(cls, model_type):
