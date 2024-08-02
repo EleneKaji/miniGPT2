@@ -4,6 +4,11 @@ from torch.nn import functional as F
 
 import math
 from dataclasses import dataclass
+import tiktoken
+import time
+
+import torch._dynamo
+torch._dynamo.config.suppress_errors = True
 
 # B T C = Batch size, Sequence length, Embedding dimension
 
@@ -22,6 +27,8 @@ class MultiHeadSelfAttention(nn.Module):
         self.c_proj = nn.Linear(config.n_embd, config.n_embd)
         self.n_head = config.n_head
         self.n_embd = config.n_embd
+
+        self.c_proj.RES_CONN_FLAG = 1 # flag to calculate to calculate residual with normalization -> sqrt n is prop cuz so we dont make it linear idk
 
         self.register_buffer("bias", torch.tril(torch.ones(config.block_size, config.block_size))
                              .view(1, 1, config.block_size, config.block_size))
@@ -94,6 +101,8 @@ class MLP(nn.Module):
         self.c_fc = nn.Linear(config.n_embd, 4 * config.n_embd)
         self.c_proj = nn.Linear(4 * config.n_embd, config.n_embd)
 
+        self.c_proj.RES_CONN_FLAG = 1
+
         """
         GELU is Gaussian error linear unit such that it avoid the issue with ReLU 
         which is it has no derivative at a certain point.
@@ -129,6 +138,22 @@ class GPT(nn.Module):
             ln_f = nn.LayerNorm(config.n_embd)
         ))
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
+
+        # shares the weight such that it helps with the embeddings
+        self.transformer.wte.weight = self.lm_head.weight
+
+        self.apply(self._init_params)
+
+    def _init_params(self, module):
+        if isinstance(module, nn.Linear):
+            std = 0.02
+            if hasattr(module, "RES_CONN_FLAG"):
+                std *= (2 * self.config.n_layer) ** -0.5
+            torch.nn.init.normal_(module.weight, mean=0.0, std=std)
+            if module.bias is not None:
+                torch.nn.init.zeros_(module.bias)
+        elif isinstance(module, nn.Embedding):
+            torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
     def forward(self, x, y=None):
         """
@@ -203,57 +228,80 @@ class GPT(nn.Module):
                     sd[k].copy_(sd_hf[k])
 
         return model
+    
+class DataLoader:
+    def __init__(self, B, T):
+        self.B = B
+        self.T = T
+        self.start = 0
+
+        with open("miniShakespare.txt", "r") as f:
+            text = f.read()
+        self.encoded_text = torch.tensor(tokenizer.encode(text))
+
+        print(f"Epoch 1: {math.floor(self.encoded_text.size(-1) / (B * T))} batches, {len(self.encoded_text)} tokens, {B * T} tokens per batch")
+        
+
+    def next_data(self):
+        x = self.encoded_text[self.start : (self.start + self.B*self.T)].view(self.B, self.T) # 32 * 4 = 128
+        y = self.encoded_text[(self.start + 1) : (self.start + self.B*self.T + 1)].view(self.B, self.T)
+
+        self.start += self.B * self.T
+        if self.start >= self.encoded_text.size(-1):
+            self.start = 0
+
+        return x, y
+
+def produce_sentence(max_length, itr):
+    print("Generated Text ")
+
+    tokens = tokenizer.encode("Hello\n")
+    tokens = torch.tensor(tokens, dtype=torch.long)
+    tokens = tokens.unsqueeze(0).repeat(itr, 1)
+    x = tokens.to(device)
+
+    while x.size(1) < max_length: 
+        with torch.no_grad():
+            logits, _ = model(x)
+            logits = logits[:, -1, :]
+            probs = F.softmax(logits, dim=-1)
+            top_probs, top_indices = torch.topk(probs, 50, dim=1)
+            selected_token = torch.multinomial(top_probs, 1) # selects a random token from each batch
+            selected_index = torch.gather(top_indices, -1, selected_token)
+            x = torch.cat((x, selected_index), dim=1)
+
+    for i in range(itr):
+        tokens = x[i, :max_length].tolist()
+        decoded = tokenizer.decode(tokens)
+        print(">", decoded, "\n")
 
 device = ("cuda:0" if torch.cuda.is_available() else "cpu") # mps stands for apple silicon that has a gpu    
 
-# model = GPT.from_pretrained("gpt2")
+torch.set_float32_matmul_precision("high") # TF32
 model = GPT(GPTConfig())
 model.eval()
 model.to(device)
+model = torch.compile(model)
 
-import tiktoken
 tokenizer = tiktoken.get_encoding("gpt2")
 
-with open("miniShakespeare.txt", "r") as f:
-    text = f.read()
-text = text[:1000]
-B, T = 4, 32
-encoded_text = torch.tensor(tokenizer.encode(text)[:B * T + 1])
-encoded_text = encoded_text.to(device)
-x = encoded_text[:-1].view(B, T)
-y = encoded_text[1:].view(B, T)
+B, T = 4, 1024
+
+dataloader = DataLoader(B, T)
 
 optimizer = torch.optim.AdamW(model.parameters(), 3e-4)
-for i in range(50):
+for i in range(30):
+    start_time = time.time()
     optimizer.zero_grad()
+    x, y = dataloader.next_data()
+    x, y = x.to(device), y.to(device)
+    # with torch.autocast(device_type=device, dtype=torch.bfloat16): # only some layers such as logits
     logits, loss = model(x, y) # loss at start should be around -ln(1/50257) cuz of cross entrophy function
     loss.backward()
     optimizer.step()
-    print(f"-> {i}\t loss: {loss.item()}")
+    torch.cuda.synchronize()
+    end_time = time.time()
+    time_diff = (end_time - start_time) * 1000
+    print(f"-> {i}\t|\t loss: {loss.item():.05f}\t|\t time (ms): {time_diff:.05f}\t|\t tok/sec: {((B * T) / time_diff * 1000):.05f}")
     
-
-
-import tiktoken
-encoder = tiktoken.get_encoding("gpt2")
-tokens = tokenizer.encode("All:\n")
-tokens = torch.tensor(tokens, dtype=torch.long)
-tokens = tokens.unsqueeze(0).repeat(5, 1)
-x = tokens.to(device)
-
-max_length = 30
-torch.manual_seed(42)
-torch.cuda.manual_seed(42)
-while x.size(1) < max_length: 
-    with torch.no_grad():
-        logits, loss = model(x)
-        logits = logits[:, -1, :]
-        probs = F.softmax(logits, dim=-1)
-        top_probs, top_indices = torch.topk(probs, 50, dim=1)
-        selected_token = torch.multinomial(top_probs, 1) # selects a random token from each batch
-        selected_index = torch.gather(top_indices, -1, selected_token)
-        x = torch.cat((x, selected_index), dim=1)
-
-for i in range(5):
-    tokens = x[i, :max_length].tolist()
-    decoded = tokenizer.decode(tokens)
-    print(">", decoded, "\n")
+produce_sentence(20, 2)
