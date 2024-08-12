@@ -7,18 +7,17 @@ from dataclasses import dataclass
 import tiktoken
 import time
 
-import torch._dynamo
-torch._dynamo.config.suppress_errors = True
+import matplotlib.pyplot as plt
 
 # B T C = Batch size, Sequence length, Embedding dimension
 
 @dataclass
 class GPTConfig:
     block_size: int = 1024 # sequence length
-    vocab_size: int = 50257 # number of tokens
-    n_layer: int = 12 # number of layers
-    n_head: int = 12 # number of heads
-    n_embd: int = 768 # embedding dimension
+    vocab_size: int = 50304 # number of tokens. Changed from 50257 so it is power of 2
+    n_layer: int = 4 # number of layers
+    n_head: int = 4 # number of heads
+    n_embd: int = 128 # embedding dimension
 
 class MultiHeadSelfAttention(nn.Module):
     def __init__(self, config):
@@ -48,11 +47,12 @@ class MultiHeadSelfAttention(nn.Module):
         k = k.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # we can transpose here as well but k.size(-1) changes
         v = v.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)
 
-        attention_scores = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))
-        attention_scores = attention_scores.masked_fill(self.bias[:, :, :T, :T] == 0, float("-inf"))
-        attention_scores = F.softmax(attention_scores, dim=-1)
+        # attention_scores = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))
+        # attention_scores = attention_scores.masked_fill(self.bias[:, :, :T, :T] == 0, float("-inf"))
+        # attention_scores = F.softmax(attention_scores, dim=-1)
+        # y = attention_scores @ v
 
-        y = attention_scores @ v
+        y = F.scaled_dot_product_attention(q, k, v, is_causal=True) # flash attention that I should research more about 2x times less
         y = y.transpose(1, 2).contiguous().view(B, T, C)
         y = self.c_proj(y)
         
@@ -234,12 +234,14 @@ class DataLoader:
         self.B = B
         self.T = T
         self.start = 0
+        self.epoch = 1
 
         with open("miniShakespare.txt", "r") as f:
             text = f.read()
         self.encoded_text = torch.tensor(tokenizer.encode(text))
+        self.encoded_text = self.encoded_text.to(device)
 
-        print(f"Epoch 1: {math.floor(self.encoded_text.size(-1) / (B * T))} batches, {len(self.encoded_text)} tokens, {B * T} tokens per batch")
+        print(f"Epoch {self.epoch}: {math.floor(self.encoded_text.size(-1) / (B * T))} batches, {len(self.encoded_text)} tokens, {B * T} tokens per batch")
         
 
     def next_data(self):
@@ -247,8 +249,10 @@ class DataLoader:
         y = self.encoded_text[(self.start + 1) : (self.start + self.B*self.T + 1)].view(self.B, self.T)
 
         self.start += self.B * self.T
-        if self.start >= self.encoded_text.size(-1):
+        if self.start + self.B*self.T >= self.encoded_text.size(-1):
             self.start = 0
+            self.epoch += 1
+            print(f"Epoch {self.epoch}")
 
         return x, y
 
@@ -275,13 +279,29 @@ def produce_sentence(max_length, itr):
         decoded = tokenizer.decode(tokens)
         print(">", decoded, "\n")
 
+epoch_steps = 82
+warmup_steps = epoch_steps
+max_steps = epoch_steps * 18
+max_lr = 3e-4
+min_lr = max_lr * 0.1
+
+def get_lr(step):
+    if step < warmup_steps:
+        return max_lr * (step + 1) / warmup_steps
+    if step > max_steps:
+        return min_lr
+    
+    decay_ratio = (step - warmup_steps) / (max_steps - warmup_steps)
+    coeff = 0.5 * (1.0 + math.cos(math.pi * decay_ratio))
+    return min_lr + coeff * (max_lr - min_lr)
+
 device = ("cuda:0" if torch.cuda.is_available() else "cpu") # mps stands for apple silicon that has a gpu    
 
 torch.set_float32_matmul_precision("high") # TF32
 model = GPT(GPTConfig())
 model.eval()
 model.to(device)
-model = torch.compile(model)
+# model = torch.compile(model)
 
 tokenizer = tiktoken.get_encoding("gpt2")
 
@@ -289,19 +309,33 @@ B, T = 4, 1024
 
 dataloader = DataLoader(B, T)
 
+lrs = []
+
 optimizer = torch.optim.AdamW(model.parameters(), 3e-4)
-for i in range(30):
+scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(optimizer, T_0=10, T_mult=1, eta_min=6e-4 * 0.1)
+
+for step in range(epoch_steps * 20):
     start_time = time.time()
     optimizer.zero_grad()
     x, y = dataloader.next_data()
-    x, y = x.to(device), y.to(device)
+    # x, y = x.to(device), y.to(device)
     # with torch.autocast(device_type=device, dtype=torch.bfloat16): # only some layers such as logits
     logits, loss = model(x, y) # loss at start should be around -ln(1/50257) cuz of cross entrophy function
     loss.backward()
+    norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
     optimizer.step()
+    scheduler.step()
+
+    lr = get_lr(step)
+    for param_group in optimizer.param_groups:
+        param_group["lr"] = lr
+    lrs.append(lr)
+    
     torch.cuda.synchronize()
     end_time = time.time()
     time_diff = (end_time - start_time) * 1000
-    print(f"-> {i}\t|\t loss: {loss.item():.05f}\t|\t time (ms): {time_diff:.05f}\t|\t tok/sec: {((B * T) / time_diff * 1000):.05f}")
+    print(f"-> {step}\t|\t loss: {loss.item():.05f}\t|\t norm: {norm:.4f}\t|\t lr: {lr}\t|\t time (ms): {time_diff:.05f}\t|\t tok/sec: {((B * T) / time_diff * 1000):.05f}")
     
 produce_sentence(20, 2)
+plt.plot(lrs)
+plt.show()
