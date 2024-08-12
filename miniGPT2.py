@@ -13,11 +13,11 @@ import matplotlib.pyplot as plt
 
 @dataclass
 class GPTConfig:
-    block_size: int = 1024 # sequence length
+    block_size: int = 32 # sequence length
     vocab_size: int = 50304 # number of tokens. Changed from 50257 so it is power of 2
     n_layer: int = 4 # number of layers
     n_head: int = 4 # number of heads
-    n_embd: int = 128 # embedding dimension
+    n_embd: int = 64 # embedding dimension
 
 class MultiHeadSelfAttention(nn.Module):
     def __init__(self, config):
@@ -230,15 +230,13 @@ class GPT(nn.Module):
         return model
     
 class DataLoader:
-    def __init__(self, B, T):
+    def __init__(self, B, T, data):
         self.B = B
         self.T = T
         self.start = 0
         self.epoch = 1
 
-        with open("miniShakespare.txt", "r") as f:
-            text = f.read()
-        self.encoded_text = torch.tensor(tokenizer.encode(text))
+        self.encoded_text = torch.tensor(data)
         self.encoded_text = self.encoded_text.to(device)
 
         print(f"Epoch {self.epoch}: {math.floor(self.encoded_text.size(-1) / (B * T))} batches, {len(self.encoded_text)} tokens, {B * T} tokens per batch")
@@ -259,7 +257,7 @@ class DataLoader:
 def produce_sentence(max_length, itr):
     print("Generated Text ")
 
-    tokens = tokenizer.encode("Hello\n")
+    tokens = tokenizer.encode("Lucas\n")
     tokens = torch.tensor(tokens, dtype=torch.long)
     tokens = tokens.unsqueeze(0).repeat(itr, 1)
     x = tokens.to(device)
@@ -279,11 +277,18 @@ def produce_sentence(max_length, itr):
         decoded = tokenizer.decode(tokens)
         print(">", decoded, "\n")
 
-epoch_steps = 82
+B, T = 256, 32
+
+epoch_steps = 270_419 // (B * T)
 warmup_steps = epoch_steps
-max_steps = epoch_steps * 18
-max_lr = 3e-4
+max_steps = epoch_steps * 48
+max_lr = 6e-4
 min_lr = max_lr * 0.1
+
+"""
+Warm up for the lr to increase and then
+cosine decay for the lr to decrease and converge to min lr
+"""
 
 def get_lr(step):
     if step < warmup_steps:
@@ -305,26 +310,30 @@ model.to(device)
 
 tokenizer = tiktoken.get_encoding("gpt2")
 
-B, T = 4, 1024
+with open("miniShakespare.txt", "r") as f:
+    text = f.read()
+tokenized_text = tokenizer.encode(text)
 
-dataloader = DataLoader(B, T)
+ratio = int(len(tokenized_text) * 0.8)
+train_data = tokenized_text[:ratio]
+test_data = tokenized_text[ratio:]
+
+train_dataloader = DataLoader(B, T, train_data)
 
 lrs = []
 
 optimizer = torch.optim.AdamW(model.parameters(), 3e-4)
-scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(optimizer, T_0=10, T_mult=1, eta_min=6e-4 * 0.1)
-
-for step in range(epoch_steps * 20):
+time0 = time.time()
+for step in range(epoch_steps * 50):
     start_time = time.time()
     optimizer.zero_grad()
-    x, y = dataloader.next_data()
+    x, y = train_dataloader.next_data()
     # x, y = x.to(device), y.to(device)
     # with torch.autocast(device_type=device, dtype=torch.bfloat16): # only some layers such as logits
     logits, loss = model(x, y) # loss at start should be around -ln(1/50257) cuz of cross entrophy function
     loss.backward()
     norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
     optimizer.step()
-    scheduler.step()
 
     lr = get_lr(step)
     for param_group in optimizer.param_groups:
@@ -335,7 +344,23 @@ for step in range(epoch_steps * 20):
     end_time = time.time()
     time_diff = (end_time - start_time) * 1000
     print(f"-> {step}\t|\t loss: {loss.item():.05f}\t|\t norm: {norm:.4f}\t|\t lr: {lr}\t|\t time (ms): {time_diff:.05f}\t|\t tok/sec: {((B * T) / time_diff * 1000):.05f}")
-    
+
+timef = time.time()
+print(f"Time Elapsed: {timef - time0}s")
 produce_sentence(20, 2)
+
+test_dataloader = DataLoader(B, T, test_data)
+
+test_epoch = 67_605 // (B * T)
+for step in range(test_epoch):
+    start_time = time.time()
+    x, y = test_dataloader.next_data()
+    logits, loss = model(x, y) # loss at start should be around -ln(1/50257) cuz of cross entrophy function
+    
+    torch.cuda.synchronize()
+    end_time = time.time()
+    time_diff = (end_time - start_time) * 1000
+    print(f"-> {step}\t|\t loss: {loss.item():.05f}\t|\t lr: {lr}\t|\t time (ms): {time_diff:.05f}\t|\t tok/sec: {((B * T) / time_diff * 1000):.05f}")
+
 plt.plot(lrs)
 plt.show()
