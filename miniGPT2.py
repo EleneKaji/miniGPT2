@@ -6,18 +6,22 @@ import math
 from dataclasses import dataclass
 import tiktoken
 import time
+import inspect
+
+import random
 
 import matplotlib.pyplot as plt
+from sklearn.decomposition import PCA
 
 # B T C = Batch size, Sequence length, Embedding dimension
 
 @dataclass
 class GPTConfig:
-    block_size: int = 32 # sequence length
+    block_size: int = 512 # sequence length
     vocab_size: int = 50304 # number of tokens. Changed from 50257 so it is power of 2
-    n_layer: int = 4 # number of layers
-    n_head: int = 4 # number of heads
-    n_embd: int = 64 # embedding dimension
+    n_layer: int = 8 # number of layers
+    n_head: int = 8 # number of heads
+    n_embd: int = 128 # embedding dimension
 
 class MultiHeadSelfAttention(nn.Module):
     def __init__(self, config):
@@ -229,18 +233,44 @@ class GPT(nn.Module):
 
         return model
     
+    def configure_optimizers(self, weight_decay, learning_rate, device):
+        param_dict = {pn: p for pn, p in self.named_parameters()} # names_parameters returns the name and the parameter
+        param_dict = {pn: p for pn, p in param_dict.items() if p.requires_grad}
+        
+        decay_params = [p for n, p in param_dict.items() if p.dim() >= 2]
+        nondecay_params = [p for n, p in param_dict.items() if p.dim() < 2]
+
+        optim_groups = [
+            {"params": decay_params, "weight _decay": weight_decay},
+            {"params": nondecay_params, "weight_decay": 0.0}
+        ]
+
+        num_decay_params = sum(p.numel() for p in decay_params)
+        num_nondecay_params = sum(p.numel() for p in nondecay_params)
+        print(f"num decayed parameter tensors: {len(decay_params)}, with {num_decay_params:,} parameters")
+        print(f"num non-decayed parameter tensors: {len(nondecay_params)}, with {num_nondecay_params:,} parameters")
+        
+        fused_availability = "fused" in inspect.signature(torch.optim.AdamW).parameters # introspection is the ability to examine the type or properties of an object at runtime
+        use_fused = fused_availability and "cuda" in device # "fused" means that multiple operations are combined into a single kernel
+        print(f"using fused AdamW: {use_fused}")
+        optimizer = torch.optim.AdamW(optim_groups, lr=learning_rate, betas=(0.9, 0.95), eps=1e-8, fused=use_fused)
+        return optimizer
+            
 class DataLoader:
-    def __init__(self, B, T, data):
+    def __init__(self, B, T, data, epoch=True):
         self.B = B
         self.T = T
         self.start = 0
         self.epoch = 1
+        self.det_epoch = epoch
 
         self.encoded_text = torch.tensor(data)
         self.encoded_text = self.encoded_text.to(device)
 
-        print(f"Epoch {self.epoch}: {math.floor(self.encoded_text.size(-1) / (B * T))} batches, {len(self.encoded_text)} tokens, {B * T} tokens per batch")
-        
+        if epoch:
+            print(f"TRAIN: epoch {self.epoch}, {math.floor(self.encoded_text.size(-1) / (B * T))} loops for {self.B} batches, {len(self.encoded_text)} tokens, {B * T} tokens per loop")
+        else:
+            print(f"TEST: {math.floor(self.encoded_text.size(-1) / (B * T))} loops for {self.B} batches, {len(self.encoded_text)} tokens, {B * T} tokens per loop")
 
     def next_data(self):
         x = self.encoded_text[self.start : (self.start + self.B*self.T)].view(self.B, self.T) # 32 * 4 = 128
@@ -249,15 +279,20 @@ class DataLoader:
         self.start += self.B * self.T
         if self.start + self.B*self.T >= self.encoded_text.size(-1):
             self.start = 0
+
+        if self.start + self.B * self.T >= self.encoded_text.size(-1) * grad_accum_steps:
             self.epoch += 1
-            print(f"Epoch {self.epoch}")
+
+            if self.det_epoch:
+                print(f"Epoch {self.epoch}")
+            
 
         return x, y
 
 def produce_sentence(max_length, itr):
     print("Generated Text ")
 
-    tokens = tokenizer.encode("Lucas\n")
+    tokens = tokenizer.encode("ANTONIO:\n")
     tokens = torch.tensor(tokens, dtype=torch.long)
     tokens = tokens.unsqueeze(0).repeat(itr, 1)
     x = tokens.to(device)
@@ -277,19 +312,10 @@ def produce_sentence(max_length, itr):
         decoded = tokenizer.decode(tokens)
         print(">", decoded, "\n")
 
-B, T = 256, 32
-
-epoch_steps = 270_419 // (B * T)
-warmup_steps = epoch_steps
-max_steps = epoch_steps * 48
-max_lr = 6e-4
-min_lr = max_lr * 0.1
-
 """
 Warm up for the lr to increase and then
 cosine decay for the lr to decrease and converge to min lr
 """
-
 def get_lr(step):
     if step < warmup_steps:
         return max_lr * (step + 1) / warmup_steps
@@ -300,67 +326,148 @@ def get_lr(step):
     coeff = 0.5 * (1.0 + math.cos(math.pi * decay_ratio))
     return min_lr + coeff * (max_lr - min_lr)
 
-device = ("cuda:0" if torch.cuda.is_available() else "cpu") # mps stands for apple silicon that has a gpu    
+def shuffle_data(data, seq_length, test_perc=0.2, split_num=2):
+    new_data = list(data)
+    split = test_perc / split_num
+    new_seq_length = seq_length + 1
+    batch_size = int(len(data) // new_seq_length * split)
+    test_data = []
 
+    if batch_size * split_num * new_seq_length > len(data):
+        raise ValueError("Not enough data to split into the requested test size")
+
+    for _ in range(split_num):
+        random_idx = random.randint(0, len(new_data) - batch_size * new_seq_length)
+
+        test_sample = new_data[random_idx:random_idx + batch_size * new_seq_length]
+        test_data.extend(test_sample)
+
+        new_data = new_data[:random_idx] + new_data[random_idx + batch_size * new_seq_length:]
+
+    return new_data, test_data
+
+
+def test():
+    tot_loss = 0
+    for _ in range(test_epoch):
+        with torch.no_grad():
+            x_test, y_test = test_dataloader.next_data()
+            with ctx:
+                logits_test, loss_test = model(x_test, y_test) # loss at start should be around -ln(1/50257) cuz of cross entrophy function
+            tot_loss += loss_test
+            torch.cuda.synchronize()
+    return tot_loss / test_epoch
+
+B, T = 16, GPTConfig.block_size
+total_batch_size = 131_072
+assert total_batch_size % (B * T) == 0, "make sure total_batch_size is divisible by B * T"
+grad_accum_steps = total_batch_size // (B * T) # 64
+print(f"Calculated gradient accumulation steps: {grad_accum_steps}")
+
+device = ("cuda:0" if torch.cuda.is_available() else "cpu") # mps stands for apple silicon that has a gpu    
+ctx = torch.autocast('cuda', dtype=torch.float16)
+scaler = torch.GradScaler(enabled=True)
 torch.set_float32_matmul_precision("high") # TF32
 model = GPT(GPTConfig())
 model.eval()
 model.to(device)
-# model = torch.compile(model)
 
 tokenizer = tiktoken.get_encoding("gpt2")
 
 with open("miniShakespare.txt", "r") as f:
     text = f.read()
 tokenized_text = tokenizer.encode(text)
-
-ratio = int(len(tokenized_text) * 0.8)
-train_data = tokenized_text[:ratio]
-test_data = tokenized_text[ratio:]
+train_data, test_data = shuffle_data(tokenized_text, T, test_perc=0.1, split_num=65)
 
 train_dataloader = DataLoader(B, T, train_data)
+test_dataloader = DataLoader(B, T, test_data, False)
+
+train_steps = int(input("Loops per train epoch: "))
+epoch_steps = train_steps // (B * T)
+warmup_steps = epoch_steps
+max_steps = epoch_steps * 28
+max_lr = 3e-4
+min_lr = max_lr * 0.1
+
+test_steps = int(input("Loops per test epoch: "))
+test_epoch = test_steps // (B * T)
 
 lrs = []
 
-optimizer = torch.optim.AdamW(model.parameters(), 3e-4)
-time0 = time.time()
-for step in range(epoch_steps * 50):
-    start_time = time.time()
-    optimizer.zero_grad()
-    x, y = train_dataloader.next_data()
-    # x, y = x.to(device), y.to(device)
-    # with torch.autocast(device_type=device, dtype=torch.bfloat16): # only some layers such as logits
-    logits, loss = model(x, y) # loss at start should be around -ln(1/50257) cuz of cross entrophy function
-    loss.backward()
-    norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-    optimizer.step()
+optimizer = model.configure_optimizers(weight_decay=0.1, learning_rate=3e-4, device=device)
 
-    lr = get_lr(step)
-    for param_group in optimizer.param_groups:
-        param_group["lr"] = lr
-    lrs.append(lr)
-    
-    torch.cuda.synchronize()
-    end_time = time.time()
-    time_diff = (end_time - start_time) * 1000
-    print(f"-> {step}\t|\t loss: {loss.item():.05f}\t|\t norm: {norm:.4f}\t|\t lr: {lr}\t|\t time (ms): {time_diff:.05f}\t|\t tok/sec: {((B * T) / time_diff * 1000):.05f}")
+train_losses = []
+test_losses = []
+time_values = []
+
+time0 = time.time()
+
+try:
+    for step in range(epoch_steps * 30):
+        start_time = time.time()
+        optimizer.zero_grad()
+
+        loss_accum = 0.0
+        for micro_step in range(grad_accum_steps):
+            x, y = train_dataloader.next_data()
+            with ctx:
+                logits, loss = model(x, y) # loss at start should be around -ln(1/50257) cuz of cross entrophy function
+            loss = loss / grad_accum_steps
+            loss_accum += loss.detach()
+            scaler.scale(loss).backward()
+
+        scaler.unscale_(optimizer)
+        norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+        scaler.step(optimizer)
+        scaler.update()
+
+        train_losses.append(loss_accum.item())
+
+        lr = get_lr(step)
+        for param_group in optimizer.param_groups:
+            param_group["lr"] = lr
+        lrs.append(lr)
+        
+        torch.cuda.synchronize()
+        end_time = time.time()
+        time_diff = (end_time - start_time) * 1000
+        time_values.append(end_time)
+        
+        loss_test = test()
+        test_losses.append(loss_test.item())
+        print(f"-> {step} | loss: {loss_accum.item():.05f} | norm: {norm:.4f}| lr: {lr:.4e} | time (ms): {time_diff:.05f} | tok/sec: {((B * T * grad_accum_steps) / time_diff * 1000):.05f} | test loss: {loss_test.item():.05f}")
+
+except KeyboardInterrupt:
+    test()
 
 timef = time.time()
 print(f"Time Elapsed: {timef - time0}s")
 produce_sentence(20, 2)
 
-test_dataloader = DataLoader(B, T, test_data)
+plt.figure(figsize=(10, 5))
+plt.plot(time_values, train_losses, label="Train Loss")
+plt.plot(time_values, test_losses, label="Test Loss", linestyle='--')
+plt.xlabel("Time (s)")
+plt.ylabel("Loss")
+plt.title("Time vs Train Loss and Test Loss")
+plt.legend()
+plt.show()
 
-test_epoch = 67_605 // (B * T)
-for step in range(test_epoch):
-    start_time = time.time()
-    x, y = test_dataloader.next_data()
-    logits, loss = model(x, y) # loss at start should be around -ln(1/50257) cuz of cross entrophy function
-    
-    torch.cuda.synchronize()
-    end_time = time.time()
-    time_diff = (end_time - start_time) * 1000
-    print(f"-> {step}\t|\t loss: {loss.item():.05f}\t|\t lr: {lr}\t|\t time (ms): {time_diff:.05f}\t|\t tok/sec: {((B * T) / time_diff * 1000):.05f}")
+word_embeddings = model.transformer.wte.weight.detach().cpu().numpy()  # (vocab_size, n_embd)
+pca = PCA(n_components=2)
+reduced_embeddings = pca.fit_transform(word_embeddings)
+
+plt.figure(figsize=(10, 10))
+plt.scatter(reduced_embeddings[:, 0], reduced_embeddings[:, 1], s=1)
+
+for i in range(100): # first 100 tokens
+    plt.annotate(str(i), (reduced_embeddings[i, 0], reduced_embeddings[i, 1]))
+
+plt.title("2D Visualization of Word Embeddings")
+plt.xlabel("Component 1")
+plt.ylabel("Component 2")
+plt.show()
 
 plt.plot(lrs)
 plt.show()
+
