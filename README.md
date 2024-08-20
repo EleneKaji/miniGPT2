@@ -5,8 +5,8 @@ Generated Text from Transformers pre_trained model after 1000 steps
     I hope I marry this boy !" Then one boy in the crowd was astonished at having been told
 
 During training (fine-tuning):
-0 | loss: 3.27386 | norm: 2.3332| lr: 1.2000e-05 | time (ms): 21741.57286 | tok/sec: 24114.53870 |
-1 | loss: 6.07360 | norm: 32.9395| lr: 2.4000e-05 | time (ms): 29645.50018 | tok/sec: 17685.24723 |
+# 0 | loss: 3.27386 | norm: 2.3332| lr: 1.2000e-05 | time (ms): 21741.57286 | tok/sec: 24114.53870 | 
+# 1 | loss: 6.07360 | norm: 32.9395| lr: 2.4000e-05 | time (ms): 29645.50018 | tok/sec: 17685.24723 |
 2 | loss: 5.78752 | norm: 28.0962| lr: 3.6000e-05 | time (ms): 29742.71941 | tok/sec: 17627.43994 |
 3 | loss: 5.25711 | norm: 24.2884| lr: 4.8000e-05 | time (ms): 30122.16210 | tok/sec: 17405.39070 |
 4 | loss: 4.83692 | norm: 22.1413| lr: 6.0000e-05 | time (ms): 30135.21719 | tok/sec: 17397.85039 |
