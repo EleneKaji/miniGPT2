@@ -205,7 +205,7 @@ During training (fine-tuning):
 197 | loss: 3.16561 | norm: 2.1000| lr: 5.6872e-04 | time (ms): 30149.85275 | tok/sec: 17389.40499 |  
 198 | loss: 3.16671 | norm: 3.6271| lr: 5.6830e-04 | time (ms): 30169.30342 | tok/sec: 17378.19375 |  
 199 | loss: 3.17430 | norm: 3.0779| lr: 5.6788e-04 | time (ms): 30140.78474 | tok/sec: 17394.63669 |  
-luating  
+evaluating  
  loss: 3.14955  
 200 | loss: 3.17701 | norm: 1.8206| lr: 5.6746e-04 | time (ms): 30170.49408 | tok/sec: 17377.50793 |  
 201 | loss: 3.19527 | norm: 3.0646| lr: 5.6703e-04 | time (ms): 30184.31950 | tok/sec: 17369.54845 |  
@@ -407,7 +407,7 @@ luating
 397 | loss: 3.12404 | norm: 1.7993| lr: 4.4091e-04 | time (ms): 29111.96494 | tok/sec: 18009.36491 |  
 398 | loss: 3.11728 | norm: 1.5960| lr: 4.4009e-04 | time (ms): 29130.36084 | tok/sec: 17997.99195 |  
 399 | loss: 3.11217 | norm: 2.8695| lr: 4.3927e-04 | time (ms): 29250.54932 | tok/sec: 17924.03945 |  
-luating  
+evaluating  
  loss: 3.11333  
 400 | loss: 3.14303 | norm: 2.3867| lr: 4.3846e-04 | time (ms): 29109.43890 | tok/sec: 18010.92772 |  
 401 | loss: 3.13652 | norm: 2.6021| lr: 4.3764e-04 | time (ms): 29121.14596 | tok/sec: 18003.68710 |  
@@ -609,7 +609,7 @@ luating
 597 | loss: 3.07626 | norm: 1.1034| lr: 2.6632e-04 | time (ms): 30151.50619 | tok/sec: 17388.45140 |  
 598 | loss: 3.07838 | norm: 1.2929| lr: 2.6545e-04 | time (ms): 30115.33737 | tok/sec: 17409.33510 |  
 599 | loss: 3.09387 | norm: 1.2609| lr: 2.6458e-04 | time (ms): 30169.44075 | tok/sec: 17378.11464 |  
-luating  
+evaluating  
  loss: 3.08128  
 600 | loss: 3.06445 | norm: 1.3843| lr: 2.6372e-04 | time (ms): 30215.00301 | tok/sec: 17351.90957 |  
 601 | loss: 3.09388 | norm: 1.1177| lr: 2.6285e-04 | time (ms): 30227.57792 | tok/sec: 17344.69104 |  
@@ -811,7 +811,7 @@ luating
 797 | loss: 3.06975 | norm: 0.7802| lr: 1.1859e-04 | time (ms): 30125.24104 | tok/sec: 17403.61178 |  
 798 | loss: 3.06082 | norm: 0.8282| lr: 1.1803e-04 | time (ms): 30178.87163 | tok/sec: 17372.68399 |  
 799 | loss: 3.07261 | norm: 0.8505| lr: 1.1748e-04 | time (ms): 30133.02207 | tok/sec: 17399.11778 |  
-luating  
+evaluating  
  loss: 3.06345  
 800 | loss: 3.07118 | norm: 0.7329| lr: 1.1693e-04 | time (ms): 30224.06673 | tok/sec: 17346.70601 |  
 801 | loss: 3.08360 | norm: 0.7246| lr: 1.1638e-04 | time (ms): 30197.01266 | tok/sec: 17362.24725 |  
